@@ -3,7 +3,7 @@
 
 // TODO make settings work
 
-use cosmic::widget::settings;
+use cosmic::widget::{self, settings};
 use cosmic::{
     cosmic_config::{self, ConfigGet, ConfigSet},
     widget::radio,
@@ -136,14 +136,14 @@ fn multi_behavior() -> Section<crate::pages::Message> {
             let descriptions = &section.descriptions;
             settings::view_section(&section.title)
                 .add(settings::item_row(vec![radio(
-                    &descriptions[span],
+                    widget::text::body(&descriptions[span]),
                     WorkspaceMode::Global,
                     Some(page.comp_workspace_config.workspace_mode),
                     Message::SetWorkspaceMode,
                 )
                 .into()]))
                 .add(settings::item_row(vec![radio(
-                    &descriptions[separate],
+                    widget::text::body(&descriptions[separate]),
                     WorkspaceMode::OutputBound,
                     Some(page.comp_workspace_config.workspace_mode),
                     Message::SetWorkspaceMode,

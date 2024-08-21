@@ -6,6 +6,7 @@ use cosmic_settings_page::Entity;
 pub mod desktop;
 pub mod display;
 pub mod input;
+pub mod networking;
 pub mod power;
 pub mod sound;
 pub mod system;
@@ -37,7 +38,9 @@ pub enum Message {
     Sound(sound::Message),
     SystemShortcuts(input::keyboard::shortcuts::ShortcutMessage),
     TilingShortcuts(input::keyboard::shortcuts::ShortcutMessage),
+    WiFi(networking::wifi::Message),
     WindowManagement(desktop::window_management::Message),
+    Wired(networking::wired::Message),
 }
 
 impl From<Message> for crate::Message {

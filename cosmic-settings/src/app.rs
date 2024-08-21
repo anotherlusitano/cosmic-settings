@@ -11,7 +11,7 @@ use crate::pages::desktop::{
     },
 };
 use crate::pages::input::{self};
-use crate::pages::{self, display, power, sound, system, time};
+use crate::pages::{self, display, networking, power, sound, system, time};
 use crate::subscription::desktop_files;
 use crate::widget::{page_title, search_header};
 use crate::PageCommands;
@@ -141,6 +141,7 @@ impl cosmic::Application for SettingsApp {
             search_selections: Vec::default(),
         };
 
+        app.insert_page::<networking::Page>();
         let desktop_id = app.insert_page::<desktop::Page>().id();
         app.insert_page::<display::Page>();
         app.insert_page::<sound::Page>();
@@ -452,8 +453,20 @@ impl cosmic::Application for SettingsApp {
                     page::update!(self.pages, message, power::Page);
                 }
 
+                crate::pages::Message::WiFi(message) => {
+                    if let Some(page) = self.pages.page_mut::<networking::wifi::Page>() {
+                        return page.update(message).map(Into::into);
+                    }
+                }
+
                 crate::pages::Message::WindowManagement(message) => {
                     page::update!(self.pages, message, desktop::window_management::Page);
+                }
+
+                crate::pages::Message::Wired(message) => {
+                    if let Some(page) = self.pages.page_mut::<networking::wired::Page>() {
+                        return page.update(message).map(Into::into);
+                    }
                 }
             },
 
