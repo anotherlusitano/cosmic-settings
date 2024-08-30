@@ -71,6 +71,7 @@ pub struct NmState {
     conn: zbus::Connection,
     sender: futures::channel::mpsc::UnboundedSender<network_manager::Request>,
     active_conns: Vec<ActiveConnectionInfo>,
+    /// Stores wireguard devices
     devices: Vec<network_manager::devices::DeviceInfo>,
 }
 
@@ -78,9 +79,9 @@ impl page::AutoBind<crate::pages::Message> for Page {}
 
 impl page::Page<crate::pages::Message> for Page {
     fn info(&self) -> cosmic_settings_page::Info {
-        page::Info::new("wired", "preferences-network-and-wireless-symbolic")
-            .title(fl!("wired"))
-            .description(fl!("connections-and-profiles", variant = "wired"))
+        page::Info::new("vpn", "preferences-network-and-wireless-symbolic")
+            .title(fl!("vpn"))
+            .description(fl!("connections-and-profiles", variant = "vpn"))
     }
 
     fn content(
@@ -98,7 +99,7 @@ impl page::Page<crate::pages::Message> for Page {
                 .width(Length::Fill)
                 .align_x(alignment::Horizontal::Right)
                 .apply(Element::from)
-                .map(crate::pages::Message::Wired),
+                .map(crate::pages::Message::Vpn),
         )
     }
 
@@ -116,7 +117,7 @@ impl page::Page<crate::pages::Message> for Page {
                         |why| Message::Error(why.to_string()),
                         |conn| Message::NetworkManagerConnect((conn, sender.clone())),
                     )
-                    .apply(crate::pages::Message::Wired)
+                    .apply(crate::pages::Message::Vpn)
             });
         }
 
@@ -188,7 +189,7 @@ impl Page {
                     active_conns: state
                         .active_conns
                         .into_iter()
-                        .filter(|info| matches!(info, ActiveConnectionInfo::Wired { .. }))
+                        .filter(|info| matches!(info, ActiveConnectionInfo::Vpn { .. }))
                         .collect(),
                 });
 
@@ -199,11 +200,11 @@ impl Page {
 
             Message::AddNetwork => {
                 return cosmic::command::future(async move {
-                    super::nm_add_wired().await;
+                    // super::nm_add_vpn().await;
                     // TODO: Update when iced is rebased to use then method.
                     Message::Refresh
                 })
-                .map(crate::pages::Message::Wired)
+                .map(crate::pages::Message::Vpn)
                 .map(crate::app::Message::PageMessage);
             }
 
@@ -266,7 +267,7 @@ impl Page {
                     // TODO: Update when iced is rebased to use then method.
                     Message::Refresh
                 })
-                .map(crate::pages::Message::Wired)
+                .map(crate::pages::Message::Vpn)
                 .map(crate::app::Message::PageMessage);
             }
 
@@ -280,7 +281,7 @@ impl Page {
             }
 
             Message::Error(why) => {
-                tracing::error!(why, "error in wired settings page");
+                tracing::error!(why, "error in VPN settings page");
             }
 
             Message::NetworkManagerConnect((conn, output)) => {
@@ -299,7 +300,7 @@ impl Page {
         if self.nm_task.is_none() {
             self.nm_task = Some(crate::utils::forward_event_loop(
                 sender,
-                |event| crate::pages::Message::Wired(Message::NetworkManager(event)),
+                |event| crate::pages::Message::Vpn(Message::NetworkManager(event)),
                 move |tx| async move {
                     futures::join!(
                         network_manager::watch(conn.clone(), tx.clone()),
@@ -342,7 +343,7 @@ impl Page {
             let conns = state
                 .active_conns
                 .into_iter()
-                .filter(|info| matches!(info, ActiveConnectionInfo::Wired { .. }))
+                .filter(|info| matches!(info, ActiveConnectionInfo::Vpn { .. }))
                 .collect();
 
             if self.view_more_popup.is_some() {
@@ -356,8 +357,8 @@ impl Page {
 
 fn devices_view() -> Section<crate::pages::Message> {
     crate::slab!(descriptions {
-        wired_conns_txt = fl!("wired", "connections");
-        remove_txt = fl!("wired", "remove");
+        vpn_conns_txt = fl!("vpn", "connections");
+        remove_txt = fl!("vpn", "remove");
         connect_txt = fl!("connect");
         connected_txt = fl!("connected");
         settings_txt = fl!("settings");
@@ -385,13 +386,13 @@ fn devices_view() -> Section<crate::pages::Message> {
                 let has_multiple_connection_profiles = device.available_connections.len() > 1;
                 let header_txt = format!(
                     "{} ({})",
-                    section.descriptions[wired_conns_txt], device.interface
+                    section.descriptions[vpn_conns_txt], device.interface
                 );
                 let known_networks = device.available_connections.iter().fold(
                     widget::settings::view_section(header_txt),
                     |networks, connection| {
                         let is_connected = active_conns.iter().any(|conn| match conn {
-                            ActiveConnectionInfo::Wired { name, .. } => {
+                            ActiveConnectionInfo::Vpn { name, .. } => {
                                 name.as_str() == connection.id.as_str()
                             }
 
@@ -469,7 +470,7 @@ fn devices_view() -> Section<crate::pages::Message> {
 
             view.spacing(spacing.space_l)
                 .apply(Element::from)
-                .map(crate::pages::Message::Wired)
+                .map(crate::pages::Message::Vpn)
         })
 }
 
@@ -491,20 +492,20 @@ pub fn update_state(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Wired)
+    .map(crate::pages::Message::Vpn)
     .map(crate::app::Message::PageMessage)
 }
 
 pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
     cosmic::command::future(async move {
         let filter =
-            |device_type| matches!(device_type, network_manager::devices::DeviceType::Ethernet);
+            |device_type| matches!(device_type, network_manager::devices::DeviceType::WireGuard);
 
         match network_manager::devices::list(&conn, filter).await {
             Ok(devices) => Message::UpdateDevices(devices),
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Wired)
+    .map(crate::pages::Message::Vpn)
     .map(crate::app::Message::PageMessage)
 }

@@ -453,6 +453,12 @@ impl cosmic::Application for SettingsApp {
                     page::update!(self.pages, message, power::Page);
                 }
 
+                crate::pages::Message::Vpn(message) => {
+                    if let Some(page) = self.pages.page_mut::<networking::vpn::Page>() {
+                        return page.update(message).map(Into::into);
+                    }
+                }
+
                 crate::pages::Message::WiFi(message) => {
                     if let Some(page) = self.pages.page_mut::<networking::wifi::Page>() {
                         return page.update(message).map(Into::into);

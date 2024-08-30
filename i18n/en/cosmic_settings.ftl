@@ -26,8 +26,10 @@ network-and-wireless = Network & Wireless
 no-networks = No networks have been found.
 settings = Settings
 visible-networks = Visible Networks
+
 vpn = VPN
-vpn-connections = VPN Connections
+    .connections = VPN Connections
+    .remove = Remove connection profile
 
 wired = Wired
     .connections = Wired Connections

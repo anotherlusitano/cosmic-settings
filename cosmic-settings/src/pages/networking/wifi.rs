@@ -58,6 +58,10 @@ pub struct Page {
     view_more_popup: Option<network_manager::SSID>,
     connecting: BTreeSet<network_manager::SSID>,
     ssid_to_uuid: BTreeMap<Box<str>, Box<str>>,
+    /// Withhold device update if the view more popup is shown.
+    withheld_devices: Option<Vec<network_manager::devices::DeviceInfo>>,
+    /// Withhold state update if the view more popup is shown.
+    withheld_state: Option<NetworkManagerState>,
 }
 
 #[derive(Debug)]
@@ -122,6 +126,8 @@ impl page::Page<crate::pages::Message> for Page {
         self.nm_state = None;
         self.ssid_to_uuid.clear();
         self.connecting.clear();
+        self.withheld_state = None;
+        self.withheld_devices = None;
 
         if let Some(cancel) = self.nm_task.take() {
             _ = cancel.send(());
@@ -151,28 +157,22 @@ impl Page {
                     _ => (),
                 }
 
-                if self.view_more_popup.is_none() {
-                    if let Some(ref mut nm_state) = self.nm_state {
-                        nm_state.state = state;
+                self.update_state(state);
 
-                        return update_devices(nm_state.conn.clone());
-                    }
+                if let Some(NmState { ref conn, .. }) = self.nm_state {
+                    return update_devices(conn.clone());
                 }
             }
 
             Message::UpdateDevices(devices) => {
-                if let Some(ref mut nm_state) = self.nm_state {
-                    nm_state.devices = devices;
-                }
+                self.update_devices(devices);
             }
 
             Message::UpdateState(state) => {
-                if let Some(ref mut nm_state) = self.nm_state {
-                    nm_state.state = state;
+                self.update_state(state);
 
-                    if let Ok(conn) = futures::executor::block_on(zbus::Connection::system()) {
-                        return connection_settings(conn);
-                    }
+                if let Some(NmState { ref conn, .. }) = self.nm_state {
+                    return connection_settings(conn.clone());
                 }
             }
 
@@ -224,10 +224,13 @@ impl Page {
 
             Message::ViewMore(ssid) => {
                 self.view_more_popup = ssid;
+                if self.view_more_popup.is_none() {
+                    self.close_popup_and_apply_updates();
+                }
             }
 
             Message::Disconnect(ssid) => {
-                self.view_more_popup = None;
+                self.close_popup_and_apply_updates();
                 if let Some(nm) = self.nm_state.as_mut() {
                     _ = nm
                         .sender
@@ -236,7 +239,7 @@ impl Page {
             }
 
             Message::Forget(ssid) => {
-                self.view_more_popup = None;
+                self.close_popup_and_apply_updates();
                 if let Some(nm) = self.nm_state.as_mut() {
                     _ = nm
                         .sender
@@ -245,7 +248,7 @@ impl Page {
             }
 
             Message::Settings(ssid) => {
-                self.view_more_popup = None;
+                self.close_popup_and_apply_updates();
 
                 if let Some(uuid) = self.ssid_to_uuid.get(ssid.as_ref()).cloned() {
                     tokio::task::spawn(
@@ -295,6 +298,39 @@ impl Page {
                     );
                 },
             ));
+        }
+    }
+
+    fn close_popup_and_apply_updates(&mut self) {
+        self.view_more_popup = None;
+        if let Some(ref mut nm_state) = self.nm_state {
+            if let Some(state) = self.withheld_state.take() {
+                nm_state.state = state;
+            }
+
+            if let Some(devices) = self.withheld_devices.take() {
+                nm_state.devices = devices;
+            }
+        }
+    }
+
+    fn update_devices(&mut self, devices: Vec<network_manager::devices::DeviceInfo>) {
+        if let Some(ref mut nm_state) = self.nm_state {
+            if self.view_more_popup.is_some() {
+                self.withheld_devices = Some(devices);
+            } else {
+                nm_state.devices = devices;
+            }
+        }
+    }
+
+    fn update_state(&mut self, state: NetworkManagerState) {
+        if let Some(ref mut nm_state) = self.nm_state {
+            if self.view_more_popup.is_some() {
+                self.withheld_state = Some(state);
+            } else {
+                nm_state.state = state;
+            }
         }
     }
 }

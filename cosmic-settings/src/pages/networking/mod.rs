@@ -1,9 +1,11 @@
 // Copyright 2024 System76 <info@system76.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-// pub mod vpn;
+pub mod vpn;
 pub mod wifi;
 pub mod wired;
+
+use std::{io, process::ExitStatus};
 
 use cosmic_settings_page as page;
 
@@ -26,25 +28,34 @@ impl page::AutoBind<crate::pages::Message> for Page {
     fn sub_pages(
         page: cosmic_settings_page::Insert<crate::pages::Message>,
     ) -> cosmic_settings_page::Insert<crate::pages::Message> {
-        page.sub_page::<wired::Page>().sub_page::<wifi::Page>()
+        page.sub_page::<wired::Page>()
+            .sub_page::<wifi::Page>()
+            .sub_page::<vpn::Page>()
     }
 }
 
-async fn nm_add_wired() {
+async fn nm_add_openvpn_file(path: &str) -> io::Result<ExitStatus> {
+    tokio::process::Command::new("nmcli")
+        .args(["connection", "import", "type", "openvpn", "file", path])
+        .status()
+        .await
+}
+
+async fn nm_add_wired() -> io::Result<ExitStatus> {
     nm_connection_editor(&["--type=802-3-ethernet", "-c"]).await
 }
 
-async fn nm_add_wifi() {
+async fn nm_add_wifi() -> io::Result<ExitStatus> {
     nm_connection_editor(&["--type=802-11-wireless", "-c"]).await
 }
 
-async fn nm_edit_connection(uuid: &str) {
+async fn nm_edit_connection(uuid: &str) -> io::Result<ExitStatus> {
     nm_connection_editor(&[&["--edit=", uuid].concat()]).await
 }
 
-async fn nm_connection_editor(args: &[&str]) {
-    _ = tokio::process::Command::new(NM_CONNECTION_EDITOR)
+async fn nm_connection_editor(args: &[&str]) -> io::Result<ExitStatus> {
+    tokio::process::Command::new(NM_CONNECTION_EDITOR)
         .args(args)
         .status()
-        .await;
+        .await
 }
