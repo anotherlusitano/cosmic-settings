@@ -51,6 +51,18 @@ pub enum Message {
     ViewMore(Option<ConnectionId>),
 }
 
+impl From<Message> for crate::app::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::Wired(message).into()
+    }
+}
+
+impl From<Message> for crate::pages::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::Wired(message)
+    }
+}
+
 pub type InterfaceId = String;
 
 #[derive(Debug, Default)]
@@ -202,9 +214,7 @@ impl Page {
                     super::nm_add_wired().await;
                     // TODO: Update when iced is rebased to use then method.
                     Message::Refresh
-                })
-                .map(crate::pages::Message::Wired)
-                .map(crate::app::Message::PageMessage);
+                });
             }
 
             Message::Activate(uuid) => {
@@ -265,9 +275,7 @@ impl Page {
                     _ = super::nm_edit_connection(uuid.as_ref()).await;
                     // TODO: Update when iced is rebased to use then method.
                     Message::Refresh
-                })
-                .map(crate::pages::Message::Wired)
-                .map(crate::app::Message::PageMessage);
+                });
             }
 
             Message::Refresh => {
@@ -491,8 +499,6 @@ pub fn update_state(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Wired)
-    .map(crate::app::Message::PageMessage)
 }
 
 pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
@@ -505,6 +511,4 @@ pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Wired)
-    .map(crate::app::Message::PageMessage)
 }

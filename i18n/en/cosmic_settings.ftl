@@ -30,6 +30,7 @@ visible-networks = Visible Networks
 vpn = VPN
     .connections = VPN Connections
     .remove = Remove connection profile
+    .select-file = Select a VPN configuration file
 
 wired = Wired
     .connections = Wired Connections

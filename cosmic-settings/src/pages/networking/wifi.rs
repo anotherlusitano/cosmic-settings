@@ -14,6 +14,7 @@ use cosmic_settings_page::{self as page, section, Section};
 use cosmic_settings_subscriptions::network_manager::{
     self, available_wifi::AccessPoint, current_networks::ActiveConnectionInfo, NetworkManagerState,
 };
+use futures::StreamExt;
 use slab::Slab;
 
 #[derive(Clone, Debug)]
@@ -49,6 +50,18 @@ pub enum Message {
     ViewMore(Option<network_manager::SSID>),
     /// Toggle WiFi access
     WiFiEnable(bool),
+}
+
+impl From<Message> for crate::app::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::WiFi(message).into()
+    }
+}
+
+impl From<Message> for crate::pages::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::WiFi(message)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -301,6 +314,7 @@ impl Page {
         }
     }
 
+    /// Closes the view more popup and applies any withheld updates.
     fn close_popup_and_apply_updates(&mut self) {
         self.view_more_popup = None;
         if let Some(ref mut nm_state) = self.nm_state {
@@ -314,6 +328,7 @@ impl Page {
         }
     }
 
+    /// Withholds updates if the view more popup is displayed.
     fn update_devices(&mut self, devices: Vec<network_manager::devices::DeviceInfo>) {
         if let Some(ref mut nm_state) = self.nm_state {
             if self.view_more_popup.is_some() {
@@ -324,6 +339,7 @@ impl Page {
         }
     }
 
+    /// Withholds updates if the view more popup is displayed.
     fn update_state(&mut self, state: NetworkManagerState) {
         if let Some(ref mut nm_state) = self.nm_state {
             if self.view_more_popup.is_some() {
@@ -530,35 +546,58 @@ fn popup_button<'a>(message: Message, text: &'a str) -> Element<'a, Message> {
 }
 
 fn connection_settings(conn: zbus::Connection) -> Command<crate::app::Message> {
+    let settings = async move {
+        let settings = network_manager::dbus::settings::NetworkManagerSettings::new(&conn).await?;
+
+        _ = settings.load_connections(&[]).await;
+
+        let settings = settings
+            // Get a list of known connections.
+            .list_connections()
+            .await?
+            // Prepare for wrapping in a concurrent stream.
+            .into_iter()
+            .map(|conn| async move { conn })
+            // Create a concurrent stream for each connection.
+            .apply(futures::stream::FuturesOrdered::from_iter)
+            // Concurrently fetch settings for each connection.
+            .filter_map(|conn| async move {
+                conn.get_settings()
+                    .await
+                    .map(network_manager::Settings::new)
+                    .ok()
+            })
+            // Reduce the settings list into a SSID->UUID map.
+            .fold(BTreeMap::new(), |mut set, settings| async move {
+                if let Some(ref wifi) = settings.wifi {
+                    if let Some(ssid) = wifi
+                        .ssid
+                        .clone()
+                        .and_then(|ssid| String::from_utf8(ssid).ok())
+                    {
+                        if let Some(ref connection) = settings.connection {
+                            if let Some(uuid) = connection.uuid.clone() {
+                                set.insert(ssid.into(), uuid.into());
+                                return set;
+                            }
+                        }
+                    }
+                }
+
+                set
+            })
+            .await;
+
+        Ok::<_, zbus::Error>(settings)
+    };
+
     cosmic::command::future(async move {
-        network_manager::settings(&conn)
+        settings
             .await
             .context("failed to get connection settings")
             .map_or_else(
                 |why| Message::Error(why.to_string()),
-                |settings| {
-                    Message::ConnectionSettings(settings.into_iter().fold(
-                        BTreeMap::new(),
-                        |mut set, settings| {
-                            if let Some(ref wifi) = settings.wifi {
-                                if let Some(ssid) = wifi
-                                    .ssid
-                                    .clone()
-                                    .and_then(|ssid| String::from_utf8(ssid).ok())
-                                {
-                                    if let Some(ref connection) = settings.connection {
-                                        if let Some(uuid) = connection.uuid.clone() {
-                                            set.insert(ssid.into(), uuid.into());
-                                            return set;
-                                        }
-                                    }
-                                }
-                            }
-
-                            set
-                        },
-                    ))
-                },
+                Message::ConnectionSettings,
             )
             .apply(crate::pages::Message::WiFi)
     })
@@ -571,8 +610,6 @@ pub fn update_state(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::WiFi)
-    .map(crate::app::Message::PageMessage)
 }
 
 pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
@@ -584,6 +621,4 @@ pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::WiFi)
-    .map(crate::app::Message::PageMessage)
 }

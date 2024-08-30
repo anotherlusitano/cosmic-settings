@@ -1,9 +1,10 @@
 // Copyright 2024 System76 <info@system76.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
+use ashpd::desktop::file_chooser::FileFilter;
 use cosmic::{
     iced::{alignment, Length},
     iced_core::text::Wrap,
@@ -12,9 +13,12 @@ use cosmic::{
 };
 use cosmic_settings_page::{self as page, section, Section};
 use cosmic_settings_subscriptions::network_manager::{
-    self, current_networks::ActiveConnectionInfo, NetworkManagerState,
+    self, current_networks::ActiveConnectionInfo, NetworkManagerState, UUID,
 };
+use futures::{FutureExt, StreamExt};
+use indexmap::IndexMap;
 use slab::Slab;
+use zbus::zvariant::ObjectPath;
 
 pub type ConnectionId = Arc<str>;
 
@@ -22,12 +26,14 @@ pub type ConnectionId = Arc<str>;
 pub enum Message {
     /// Activate a connection
     Activate(ConnectionId),
-    /// Add a network connection with nm-connection-editor
+    /// Add a network connection
     AddNetwork,
     /// Deactivate a connection.
     Deactivate(ConnectionId),
     /// An error occurred.
     Error(String),
+    /// Update the list of known connections.
+    KnownConnections(IndexMap<UUID, (ObjectPath<'static>, String)>),
     /// An update from the network manager daemon
     NetworkManager(network_manager::Event),
     /// Successfully connected to the system dbus.
@@ -51,6 +57,18 @@ pub enum Message {
     ViewMore(Option<ConnectionId>),
 }
 
+impl From<Message> for crate::app::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::Vpn(message).into()
+    }
+}
+
+impl From<Message> for crate::pages::Message {
+    fn from(message: Message) -> Self {
+        crate::pages::Message::Vpn(message)
+    }
+}
+
 pub type InterfaceId = String;
 
 #[derive(Debug, Default)]
@@ -58,8 +76,7 @@ pub struct Page {
     nm_task: Option<tokio::sync::oneshot::Sender<()>>,
     nm_state: Option<NmState>,
     view_more_popup: Option<ConnectionId>,
-    // connections: IndexMap<ConnectionId, InterfaceId>,
-    connecting: BTreeSet<ConnectionId>,
+    known_connections: IndexMap<UUID, (ObjectPath<'static>, String)>,
     /// Withhold device update if the view more popup is shown.
     withheld_devices: Option<Vec<network_manager::devices::DeviceInfo>>,
     /// Withhold active connections update if the view more popup is shown.
@@ -117,7 +134,6 @@ impl page::Page<crate::pages::Message> for Page {
                         |why| Message::Error(why.to_string()),
                         |conn| Message::NetworkManagerConnect((conn, sender.clone())),
                     )
-                    .apply(crate::pages::Message::Vpn)
             });
         }
 
@@ -129,7 +145,6 @@ impl page::Page<crate::pages::Message> for Page {
         self.nm_state = None;
         self.withheld_active_conns = None;
         self.withheld_devices = None;
-        self.connecting.clear();
 
         if let Some(cancel) = self.nm_task.take() {
             _ = cancel.send(());
@@ -154,8 +169,15 @@ impl Page {
                 if let Some(NmState { ref conn, .. }) = self.nm_state {
                     let conn = conn.clone();
                     self.update_active_conns(state);
-                    return update_devices(conn);
+                    return cosmic::command::batch(vec![
+                        connection_settings(conn.clone()),
+                        update_devices(conn),
+                    ]);
                 }
+            }
+
+            Message::KnownConnections(connections) => {
+                self.known_connections = connections;
             }
 
             Message::UpdateDevices(devices) => {
@@ -173,6 +195,7 @@ impl Page {
                     return cosmic::command::batch(vec![
                         update_state(conn.clone()),
                         update_devices(conn.clone()),
+                        connection_settings(conn.clone()),
                     ]);
                 }
             }
@@ -193,47 +216,25 @@ impl Page {
                         .collect(),
                 });
 
-                return update_devices(conn);
+                return cosmic::command::batch(vec![
+                    connection_settings(conn.clone()),
+                    update_devices(conn),
+                ]);
             }
 
             Message::NetworkManager(_event) => (),
 
-            Message::AddNetwork => {
-                return cosmic::command::future(async move {
-                    // super::nm_add_vpn().await;
-                    // TODO: Update when iced is rebased to use then method.
-                    Message::Refresh
-                })
-                .map(crate::pages::Message::Vpn)
-                .map(crate::app::Message::PageMessage);
-            }
+            Message::AddNetwork => return add_network(),
 
             Message::Activate(uuid) => {
                 self.close_popup_and_apply_updates();
 
-                if let Some(NmState {
-                    ref devices,
-                    ref sender,
-                    ..
-                }) = self.nm_state
-                {
-                    for device in devices {
-                        let device_conn = device
-                            .available_connections
-                            .iter()
-                            .find(|conn| conn.uuid.as_ref() == uuid.as_ref());
-
-                        if let Some(device_conn) = device_conn {
-                            let device_path = device.path.clone();
-                            let conn_path = device_conn.path.clone();
-
-                            _ = sender.unbounded_send(network_manager::Request::Activate(
-                                device_path,
-                                conn_path,
-                            ));
-
-                            break;
-                        }
+                if let Some(NmState { ref sender, .. }) = self.nm_state {
+                    if let Some((ref conn_path, _)) = self.known_connections.get(&uuid) {
+                        _ = sender.unbounded_send(network_manager::Request::Activate(
+                            ObjectPath::from_static_str_unchecked("/"),
+                            conn_path.clone(),
+                        ));
                     }
                 }
             }
@@ -263,12 +264,15 @@ impl Page {
                 self.close_popup_and_apply_updates();
 
                 return cosmic::command::future(async move {
-                    _ = super::nm_edit_connection(uuid.as_ref()).await;
-                    // TODO: Update when iced is rebased to use then method.
-                    Message::Refresh
-                })
-                .map(crate::pages::Message::Vpn)
-                .map(crate::app::Message::PageMessage);
+                    super::nm_edit_connection(uuid.as_ref())
+                        .then(|res| async move {
+                            match res.context("failed to open connection editor") {
+                                Ok(_) => Message::Refresh,
+                                Err(why) => Message::Error(why.to_string()),
+                            }
+                        })
+                        .await
+                });
             }
 
             Message::Refresh => {
@@ -276,6 +280,7 @@ impl Page {
                     return cosmic::command::batch(vec![
                         update_state(conn.clone()),
                         update_devices(conn.clone()),
+                        connection_settings(conn.clone()),
                     ]);
                 }
             }
@@ -369,9 +374,7 @@ fn devices_view() -> Section<crate::pages::Message> {
         .descriptions(descriptions)
         .view::<Page>(move |_binder, page, section| {
             let Some(NmState {
-                ref active_conns,
-                ref devices,
-                ..
+                ref active_conns, ..
             }) = page.nm_state
             else {
                 return cosmic::widget::column().into();
@@ -382,19 +385,13 @@ fn devices_view() -> Section<crate::pages::Message> {
 
             let mut view = widget::column::with_capacity(4);
 
-            for device in devices {
-                let has_multiple_connection_profiles = device.available_connections.len() > 1;
-                let header_txt = format!(
-                    "{} ({})",
-                    section.descriptions[vpn_conns_txt], device.interface
-                );
-                let known_networks = device.available_connections.iter().fold(
-                    widget::settings::view_section(header_txt),
-                    |networks, connection| {
+            if page.known_connections.is_empty() {
+            } else {
+                let known_networks = page.known_connections.iter().fold(
+                    widget::settings::view_section(&section.descriptions[vpn_conns_txt]),
+                    |networks, (uuid, (_, id))| {
                         let is_connected = active_conns.iter().any(|conn| match conn {
-                            ActiveConnectionInfo::Vpn { name, .. } => {
-                                name.as_str() == connection.id.as_str()
-                            }
+                            ActiveConnectionInfo::Vpn { name, .. } => name.as_str() == id.as_str(),
 
                             _ => false,
                         });
@@ -404,11 +401,11 @@ fn devices_view() -> Section<crate::pages::Message> {
                         } else {
                             (
                                 &section.descriptions[connect_txt],
-                                Some(Message::Activate(connection.uuid.clone())),
+                                Some(Message::Activate(uuid.clone())),
                             )
                         };
 
-                        let identifier = widget::text::body(&connection.id).wrap(Wrap::Glyph);
+                        let identifier = widget::text::body(id.as_str()).wrap(Wrap::Glyph);
 
                         let connect = widget::button::text(connect_txt).on_press_maybe(connect_msg);
 
@@ -418,7 +415,7 @@ fn devices_view() -> Section<crate::pages::Message> {
                         let view_more: Option<Element<_>> = if page
                             .view_more_popup
                             .as_deref()
-                            .map_or(false, |id| id == connection.uuid.as_ref())
+                            .map_or(false, |id| id == uuid.as_ref())
                         {
                             widget::popover(view_more_button.on_press(Message::ViewMore(None)))
                                 .position(widget::popover::Position::Bottom)
@@ -427,26 +424,24 @@ fn devices_view() -> Section<crate::pages::Message> {
                                     widget::column()
                                         .push_maybe(is_connected.then(|| {
                                             popup_button(
-                                                Message::Deactivate(connection.uuid.clone()),
+                                                Message::Deactivate(uuid.clone()),
                                                 &section.descriptions[disconnect_txt],
                                             )
                                         }))
                                         .push(popup_button(
-                                            Message::Settings(connection.uuid.clone()),
+                                            Message::Settings(uuid.clone()),
                                             &section.descriptions[settings_txt],
                                         ))
-                                        .push_maybe(has_multiple_connection_profiles.then(|| {
-                                            popup_button(
-                                                Message::RemoveProfile(connection.uuid.clone()),
-                                                &section.descriptions[remove_txt],
-                                            )
-                                        }))
+                                        .push(popup_button(
+                                            Message::RemoveProfile(uuid.clone()),
+                                            &section.descriptions[remove_txt],
+                                        ))
                                         .width(Length::Fixed(200.0))
                                 })
                                 .apply(|e| Some(Element::from(e)))
                         } else {
                             view_more_button
-                                .on_press(Message::ViewMore(Some(connection.uuid.clone())))
+                                .on_press(Message::ViewMore(Some(uuid.clone())))
                                 .apply(|e| Some(Element::from(e)))
                         };
 
@@ -485,18 +480,16 @@ fn popup_button<'a>(message: Message, text: &'a str) -> Element<'a, Message> {
         .into()
 }
 
-pub fn update_state(conn: zbus::Connection) -> Command<crate::app::Message> {
+fn update_state(conn: zbus::Connection) -> Command<crate::app::Message> {
     cosmic::command::future(async move {
         match NetworkManagerState::new(&conn).await {
             Ok(state) => Message::UpdateState(state),
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Vpn)
-    .map(crate::app::Message::PageMessage)
 }
 
-pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
+fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
     cosmic::command::future(async move {
         let filter =
             |device_type| matches!(device_type, network_manager::devices::DeviceType::WireGuard);
@@ -506,6 +499,80 @@ pub fn update_devices(conn: zbus::Connection) -> Command<crate::app::Message> {
             Err(why) => Message::Error(why.to_string()),
         }
     })
-    .map(crate::pages::Message::Vpn)
-    .map(crate::app::Message::PageMessage)
+}
+
+fn add_network() -> Command<crate::app::Message> {
+    let Some(dir) = dirs::download_dir().or_else(dirs::home_dir) else {
+        return Command::none();
+    };
+
+    cosmic::dialog::file_chooser::open::Dialog::new()
+        .directory(dir)
+        .title(fl!("vpn", "select-file"))
+        .filter(FileFilter::new("OpenVPN").mimetype("application/x-openvpn-profile"))
+        .open_file()
+        .then(|result| async move {
+            match result {
+                Ok(response) => {
+                    _ = super::nm_add_vpn_file("openvpn", response.url().path()).await;
+                    Message::Refresh
+                }
+                Err(why) => {
+                    return Message::Error(why.to_string());
+                }
+            }
+        })
+        .apply(cosmic::command::future)
+}
+
+fn connection_settings(conn: zbus::Connection) -> Command<crate::app::Message> {
+    let settings = async move {
+        let settings = network_manager::dbus::settings::NetworkManagerSettings::new(&conn).await?;
+
+        _ = settings.load_connections(&[]).await;
+
+        let settings = settings
+            // Get a list of known connections.
+            .list_connections()
+            .await?
+            // Prepare for wrapping in a concurrent stream.
+            .into_iter()
+            .map(|conn| async move { conn })
+            // Create a concurrent stream for each connection.
+            .apply(futures::stream::FuturesOrdered::from_iter)
+            // Concurrently fetch settings for each connection, and filter for VPN.
+            .filter_map(|conn| async move {
+                let settings = conn.get_settings().await.ok()?;
+
+                let connection = settings.get("connection")?;
+
+                if connection.get("type")?.downcast_ref::<String>().ok()? != "vpn" {
+                    return None;
+                }
+
+                let id = connection.get("id")?.downcast_ref::<String>().ok()?;
+                let uuid = connection.get("uuid")?.downcast_ref::<String>().ok()?;
+                let path = conn.inner().path().to_owned();
+
+                Some((Arc::from(uuid), (path, id)))
+            })
+            // Reduce the settings list into
+            .fold(IndexMap::new(), |mut set, (uuid, data)| async move {
+                set.insert(uuid, data);
+                set
+            })
+            .await;
+
+        Ok::<_, zbus::Error>(settings)
+    };
+
+    cosmic::command::future(async move {
+        settings
+            .await
+            .context("failed to get connection settings")
+            .map_or_else(
+                |why| Message::Error(why.to_string()),
+                Message::KnownConnections,
+            )
+    })
 }

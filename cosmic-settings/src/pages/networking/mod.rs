@@ -5,7 +5,7 @@ pub mod vpn;
 pub mod wifi;
 pub mod wired;
 
-use std::{io, process::ExitStatus};
+use std::{ffi::OsStr, io, process::ExitStatus};
 
 use cosmic_settings_page as page;
 
@@ -34,9 +34,10 @@ impl page::AutoBind<crate::pages::Message> for Page {
     }
 }
 
-async fn nm_add_openvpn_file(path: &str) -> io::Result<ExitStatus> {
+async fn nm_add_vpn_file<P: AsRef<OsStr>>(type_: &str, path: P) -> io::Result<ExitStatus> {
     tokio::process::Command::new("nmcli")
-        .args(["connection", "import", "type", "openvpn", "file", path])
+        .args(["connection", "import", "type", type_, "file"])
+        .arg(path)
         .status()
         .await
 }
